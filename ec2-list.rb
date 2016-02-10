@@ -4,27 +4,43 @@ require 'io/console'
 require 'ipaddr'
 require 'optparse'
 
+# Don't print esc-sequences when output to file 
 unless $stdout.tty?
   String.disable_colorization = true
 end
 
+# Lookup "Name" tag and return its value
 def getName(tags)
   name_tag = tags.find { |tag| tag.key == "Name" }
   name_tag ? name_tag.value : nil
 end
 
+# Print a text into a field of specified size
 def echo(text, fill, default='')
   text = default unless text
   (text.length > fill) ? text[0, fill] : text.ljust(fill, ' ')
 end
 
-def echo_name(name, fill = 24) echo(name, fill, '-- Unnamed --') end
+# Utility functions to print IP addresses and VPC/Subnet names:
 def echo_ip(ip) echo(ip ? ip.to_s : nil, 16, '-- dynamic --') end
+def echo_name(name, fill = 24) echo(name, fill, '-- Unnamed --') end
 
+# IP address factory
 def make_ip(ip) ip ? IPAddr.new(ip) : nil end
 
-# Print details about a specific instance
-def print_details(instance_id)
+# Instance dictionary factory
+def make_instance(i)
+  { id: i.instance_id, name: getName(i.tags), state: i.state.name, arch: i.architecture, launched: i.launch_time,
+    reason: (i.state_transition_reason and i.state_transition_reason.length > 0 ? i.state_transition_reason : nil), 
+    ec2_class: i.instance_type, private_ip: make_ip(i.private_ip_address), public_ip: make_ip(i.public_ip_address), 
+    windows: i.platform == 'windows', spot: i.instance_lifecycle == 'spot', monitoring: i.monitoring.state == 'enabled',
+    sec_groups: i.security_groups.map {|g| g.group_name} .join(', '), key_pair: i.key_name, ami: i.image_id,
+    virtualization_type: i.virtualization_type     
+  }
+end
+
+# Get details about a specific instance
+def get_ec2_details(instance_id)
   # Get the data
   ec2 = Aws::EC2::Client.new()
   begin
@@ -33,46 +49,61 @@ def print_details(instance_id)
     puts "Can't found an EC2 instance with given ID: #{instance_id}"
     exit
   end
-  i = res.reservations[0].instances[0]
-  if i.vpc_id
-    vpc_name = getName( ec2.describe_vpcs({vpc_ids:[i.vpc_id]}).vpcs[0].tags )
-    subnet_name = getName( ec2.describe_subnets({subnet_ids:[i.subnet_id]}).subnets[0].tags )
+  i =  res.reservations[0].instances[0]
+  instance = make_instance( i )
+
+  begin
+    res = ec2.describe_image_attribute({image_id: i.image_id, attribute: "description"})
+    instance[:ami_desc] = res.description.value
+  rescue
+    instance[:ami_desc] = '-- unavailable as of now --'
   end
 
-  # Output the information
-  print "ID: ".bold, i.instance_id
-  print "   Name: ".bold, getName(i.tags)
-  print "   State: ".bold, i.state.name
-  if i.state.name == 'running'
-    print ", launched at #{i.launch_time}"
-  elsif i.state_transition_reason and i.state_transition_reason.length > 0
-    print " via #{i.state_transition_reason}"
+  if i.vpc_id
+    instance[:vpc] = getName( ec2.describe_vpcs({vpc_ids:[i.vpc_id]}).vpcs[0].tags )
+    instance[:subnet] = getName( ec2.describe_subnets({subnet_ids:[i.subnet_id]}).subnets[0].tags )
+  end
+
+  instance
+end
+
+# Print details about a specific instance
+def print_details(inst)
+  print "ID: ".bold, inst[:id], "   Name: ".bold, inst[:name], "   State: ".bold, inst[:state]
+  if inst[:state] == 'running'
+    print ", launched at #{inst[:launched]}"
+  elsif inst[:reason]
+    print " via #{inst[:reason]}"
   end
   puts
 
-  if i.vpc_id
-    print "VPC: ".bold, vpc_name, "   Subnet: ".bold, subnet_name
+  if inst[:vpc]
+    print "VPC: ".bold, inst[:vpc], "   Subnet: ".bold, inst[:subnet]
   else
     print "EC2 Classic".bold
   end
-  print "   Private IP: ".bold, echo_ip( make_ip(i.private_ip_address) )
-  if i.vpc_id and i.public_ip_address.nil?
+  print "   Private IP: ".bold, echo_ip( inst[:private_ip] )
+  if inst[:vpc] and not inst[:private_ip]
     print "   Public IP is not allocated".bold
   else
-    print "   Public IP: ".bold, echo_ip( make_ip(i.public_ip_address) )
+    print "   Public IP: ".bold, echo_ip( inst[:public_ip] )
   end
   puts
 
-  print "EC2 Class: ".bold, i.instance_type,"   Architecture: ".bold, i.architecture, "   Virtualization: ".bold, i.virtualization_type
-  print "   Spot instance".bold if i.instance_lifecycle == 'spot'
-  if i.platform == 'windows'
-    print "   Windows".bold
+  print "EC2 Class: ".bold, inst[:ec2_class], " [#{inst[:virtualization_type]}]", "   Arch: ".bold, inst[:arch]
+  print "   [Spot]".bold if inst[:spot]
+  print "   [Monitoring]".bold if inst[:monitoring]
+  if inst[:windows]
+    print "   [Windows]".bold
   else
-    print "   Keypair: ".bold, i.key_name
+    print "   Keypair: ".bold, inst[:key_pair]
   end
   puts
 
-  print "Security Groups: ".bold, i.security_groups.map {|g| g.group_name} .join(', ')
+  print "AMI: ".bold, inst[:ami], "  (#{inst[:ami_desc]})"
+  puts
+
+  print "Security Groups: ".bold, inst[:sec_groups]
   puts
 end
 
@@ -93,7 +124,8 @@ end.parse!
 ENV['AWS_REGION'] = 'us-east-1' unless ENV.has_key?('AWS_REGION')
 
 if options.has_key? :instance_id
-  print_details options[:instance_id] 
+  puts
+  print_details( get_ec2_details( options[:instance_id] ) ) 
   exit
 end
 
