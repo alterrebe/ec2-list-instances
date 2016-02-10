@@ -84,11 +84,22 @@ def make_ip(ip) ip ? IPAddr.new(ip) : nil end
 
 # Instance dictionary factory
 def make_instance(i)
-  { id: i.instance_id, name: getName(i.tags), state: i.state.name, arch: i.architecture, launched: i.launch_time,
+  { 
+    id: i.instance_id, 
+    name: getName(i.tags), 
+    state: i.state.name, 
+    arch: i.architecture, 
+    launched: i.launch_time,
     reason: (i.state_transition_reason and i.state_transition_reason.length > 0 ? i.state_transition_reason : nil), 
-    ec2_class: i.instance_type, private_ip: make_ip(i.private_ip_address), public_ip: make_ip(i.public_ip_address), 
-    windows: i.platform == 'windows', spot: i.instance_lifecycle == 'spot', monitoring: i.monitoring.state == 'enabled',
-    sec_groups: i.security_groups.map {|g| g.group_name} .join(', '), key_pair: i.key_name, ami: i.image_id,
+    ec2_class: i.instance_type, 
+    private_ip: make_ip(i.private_ip_address), 
+    public_ip: make_ip(i.public_ip_address), 
+    windows: i.platform == 'windows', 
+    spot: i.instance_lifecycle == 'spot', 
+    monitoring: i.monitoring.state == 'enabled',
+    sec_groups: i.security_groups.map {|g| g.group_name} .join(', '), 
+    key_pair: i.key_name, 
+    ami: i.image_id,
     virtualization_type: i.virtualization_type     
   }
 end
@@ -120,7 +131,7 @@ def get_ec2_details(instance_id)
   instance
 end
 
-AVAILABLE_STATE_FILTER={ name:"state", values: [ "available" ] }
+AVAILABLE_STATE_FILTER = { name:"state", values: [ "available" ] }  # we don't care about unavailable VPCs/Subnets
 
 # Collecting a list of instances:
 def get_ec2_list_info(name_regex)
@@ -230,13 +241,13 @@ OptionParser.new do |opts|
   opts.banner = "Usage:".bold + " ec2-list.rb [options]\n\n" + 
     "When no options given the script prints information about all the instances.\n" +
     "Flags meaning: " + "W".bold + " - Windows, " + "S".bold + " - spot instance, " + "I".bold + 
-    " - internal (i.e. having no public IP), " + "M".bold + " - monitoring enabled\n\n"
+    " - internal (i.e. having no public IP), " + "M".bold + " - monitoring enabled\n\n" +
     "Options:".bold
   opts.on("-s NAME", "--search NAME", "Limit the list by instances with names matching the given regexp (case-insensitive)") { |v| options[:name_regex] = Regexp.new(v, true) }
   opts.on("-i ID",   "--instance ID", "Print details about instance with given ID") { |v| options[:instance_id] = v }
   opts.on("-A ACCESS_KEY", "--access-key ACCESS_KEY", "Specify AWS access key (or define AWS_ACCESS_KEY environment variable)") { |v| ENV['AWS_ACCESS_KEY'] = v } 
   opts.on("-S SECRET_KEY", "--secret-key SECRET_KEY", "Specify AWS secret key (or define AWS_SECRET_ACCESS_KEY environment variable)") { |v| ENV['AWS_SECRET_ACCESS_KEY'] = v } 
-  opts.on("-R REGION", "--region REGION", "Specify AWS region to use (or define AWS_REGION environment variable)") { |v| ENV['AWS_REGION'] = v }
+  opts.on("-R REGION", "--region REGION", "Specify AWS region (or define AWS_REGION environment variable). Uses us-east-1 by default") { |v| ENV['AWS_REGION'] = v }
 end.parse!
 
 ENV['AWS_REGION'] = 'us-east-1' unless ENV.has_key?('AWS_REGION')
