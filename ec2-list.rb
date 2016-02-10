@@ -251,6 +251,10 @@ OptionParser.new do |opts|
 end.parse!
 
 ENV['AWS_REGION'] = 'us-east-1' unless ENV.has_key?('AWS_REGION')
+unless ENV['AWS_ACCESS_KEY'] and ENV['AWS_SECRET_ACCESS_KEY']
+  puts "You need to specify AWS credentials (either through environment or command line options). See 'ec2-list.rb -h' for details"
+  exit
+end
 
 if options.has_key? :instance_id
   puts
