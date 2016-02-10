@@ -1,8 +1,11 @@
-require 'aws-sdk'
-require 'colorize'
+#! /usr/bin/env ruby
+
 require 'io/console'
 require 'ipaddr'
 require 'optparse'
+
+require 'aws-sdk'
+require 'colorize'
 
 # Don't print esc-sequences when output to file 
 unless $stdout.tty?
