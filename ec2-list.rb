@@ -25,6 +25,57 @@ end
 def echo_ip(ip) echo(ip ? ip.to_s : nil, 16, '-- dynamic --') end
 def echo_name(name, fill = 24) echo(name, fill, '-- Unnamed --') end
 
+# Print fancy state indicator:
+def echo_state(state)
+  if String.disable_colorization
+    case state
+      when 'running' then '+ ' 
+      when 'stopped' then '- '
+      when 'terminated' then 'X '
+      when 'pending' then 'O '
+      when 'shutting-down' then '\\_'
+      when 'stopping' then '~-'
+      else '??'
+    end
+  else
+    case state
+      when 'running' then '✅ ' 
+      when 'stopped' then '❙❙'
+      when 'terminated' then '⚫ '
+      when 'pending' then '⚪ '
+      when 'shutting-down' then '♺ '
+      when 'stopping' then '⌛ '
+      else '??'
+    end
+  end
+end
+
+# Print a line with brief instance info
+def echo_instance(i, is_vpc)
+  ip_to_print = is_vpc ? i[:private_ip] : i[:public_ip]
+
+  print "#{echo_state(i[:state])} "
+  print "#{echo_ip(ip_to_print)} "
+  print "#{echo_name(i[:name], 40)} #{echo(i[:ec2_class],12)}"          
+
+  flags = i[:windows] ? 'W'.bold : ' '
+  flags << (i[:spot] ? 'S'.bold : ' ')
+  flags << (i[:monitoring] ? 'M'.bold : ' ')
+  if is_vpc and i[:state] == 'running' and i[:public_ip].nil?
+    flags << 'I'.bold
+  else
+    flags << ' '
+  end
+  print " #{flags} "
+
+  if is_vpc
+    print echo_ip(i[:public_ip])
+  else
+    print echo(i[:arch], 6)
+  end
+  puts "  #{i[:id]}"
+end
+
 # IP address factory
 def make_ip(ip) ip ? IPAddr.new(ip) : nil end
 
@@ -41,7 +92,6 @@ end
 
 # Get details about a specific instance
 def get_ec2_details(instance_id)
-  # Get the data
   ec2 = Aws::EC2::Client.new()
   begin
     res = ec2.describe_instances({instance_ids:[instance_id]})
@@ -65,6 +115,43 @@ def get_ec2_details(instance_id)
   end
 
   instance
+end
+
+AVAILABLE_STATE_FILTER={ name:"state", values: [ "available" ] }
+
+# Collecting a list of instances:
+def get_ec2_list_info(name_regex)
+  ec2 = Aws::EC2::Client.new()
+
+  # Load VPCs
+  vpcs={}
+  ec2.describe_vpcs( {filters:[AVAILABLE_STATE_FILTER]} ).vpcs.each do |vpc|
+    vpcs[ vpc.vpc_id ] = { name: getName(vpc.tags), cidr: vpc.cidr_block, subnets: {} }
+  end
+
+  # Load subnets
+  ec2.describe_subnets( {filters:[AVAILABLE_STATE_FILTER]} ).subnets.each do |sn|
+    vpc = vpcs[ sn.vpc_id ]
+    vpc[:subnets][ sn.subnet_id ] = { name: getName(sn.tags), zone: sn.availability_zone, cidr: sn.cidr_block, instances: [] }
+  end
+
+  ec2_classic = []
+
+  # Load instances
+  instances = ec2.describe_instances().reservations.map { |r| r.instances } .flatten
+  instances.each do |i|
+    next if name_regex and not name_regex =~ getName(i.tags)
+    instance = make_instance( i )
+    if i.vpc_id
+      vpc = vpcs[ i.vpc_id ]
+      sn = vpc[:subnets][ i.subnet_id ]
+      sn[:instances] << instance
+    else
+      ec2_classic << instance
+    end
+  end
+
+  [vpcs, ec2_classic]
 end
 
 # Print details about a specific instance
@@ -107,6 +194,34 @@ def print_details(inst)
   puts
 end
 
+# Print a list of EC2 instances broken by VPC/Subnets
+def print_ec2_list(vpcs, ec2_classic)
+  vpcs = vpcs.sort_by { |id, vpc| vpc[:cidr] }.each do |ve| 
+    vpc = ve[1]
+    if vpc[:subnets].map { |_,sn| sn[:instances].length } .reduce(:+) > 0
+      vpc[:subnets].sort_by { |id, sn| sn[:cidr] }.each do |se|
+        subnet = se[1]
+        if subnet[:instances].length > 0
+          print "\n----- VPC: ".bold, echo_name(vpc[:name]), "  Subnet: ".bold, echo_name(subnet[:name])
+          print "   #{subnet[:cidr]} - #{subnet[:zone]} "
+          puts "-----".bold
+          subnet[:instances].sort_by{ |i| i[:private_ip] } .each do |i|
+            echo_instance(i, true)
+          end
+        end
+      end
+    end
+  end
+
+  if ec2_classic.length > 0
+    puts "\n----- EC2 Classic --------------------------------------------------------------------------------------".bold
+    ec2_classic.sort_by{ |i| i[:name] ? i[:name] : '' } .each do |i|
+      echo_instance(i, false)
+    end
+  end
+end
+
+# Parse command line options (if any) and run the process
 options = { }
 OptionParser.new do |opts|
   opts.banner = "Usage:".bold + " ec2-list.rb [options]\n\n" + 
@@ -126,116 +241,6 @@ ENV['AWS_REGION'] = 'us-east-1' unless ENV.has_key?('AWS_REGION')
 if options.has_key? :instance_id
   puts
   print_details( get_ec2_details( options[:instance_id] ) ) 
-  exit
-end
-
-# Collecting a list of instances:
-
-ec2 = Aws::EC2::Client.new()
-
-# Print fancy state indicator:
-def echoState(state)
-  if String.disable_colorization
-    case state
-      when 'running' then '+ ' 
-      when 'stopped' then '- '
-      when 'terminated' then 'X '
-      when 'pending' then 'O '
-      when 'shutting-down' then '\\_'
-      when 'stopping' then '~-'
-      else '??'
-    end
-  else
-    case state
-      when 'running' then '✅ ' 
-      when 'stopped' then '❙❙'
-      when 'terminated' then '⚫ '
-      when 'pending' then '⚪ '
-      when 'shutting-down' then '♺ '
-      when 'stopping' then '⌛ '
-      else '??'
-    end
-  end
-end
-
-AVAILABLE_STATE_FILTER={ name:"state", values: [ "available" ] }
-
-vpcs={}
-ec2.describe_vpcs( {filters:[AVAILABLE_STATE_FILTER]} ).vpcs.each do |vpc|
-#  puts "VPC: #{getName(vpc.tags)} (#{vpc.vpc_id}) CIDR: #{vpc.cidr_block}"
-  vpcs[ vpc.vpc_id ] = { name: getName(vpc.tags), cidr: vpc.cidr_block, subnets: {} }
-end
-
-
-ec2.describe_subnets( {filters:[AVAILABLE_STATE_FILTER]} ).subnets.each do |sn|
-#  puts "Subnet: #{getName(sn.tags)} (#{sn.subnet_id})/#{sn.vpc_id}) #{sn.state} #{sn.availability_zone}"
-  vpc = vpcs[ sn.vpc_id ]
-  vpc[:subnets][ sn.subnet_id ] = { name: getName(sn.tags), zone: sn.availability_zone, cidr: sn.cidr_block, instances: [] }
-end
-
-ec2_classic = []
-
-instances = ec2.describe_instances().reservations.map { |r| r.instances } .flatten
-instances.each do |i|
-  instance_name = getName(i.tags)
-  next if options[:name_regex] and not options[:name_regex] =~ instance_name
-  inst = { id: i.instance_id, state: i.state.name, ec2_class: i.instance_type, launched: i.launch_time, type: i.virtualization_type,
-	   name: instance_name, private_ip: make_ip(i.private_ip_address), public_ip: make_ip(i.public_ip_address), arch: i.architecture, 
-	   windows: i.platform == 'windows', spot: i.instance_lifecycle == 'spot', monitoring: i.monitoring.state == 'enabled' }
-  if i.vpc_id
-    vpc = vpcs[ i.vpc_id ]
-    sn = vpc[:subnets][ i.subnet_id ]
-    sn[:instances] << inst
-  else
-    ec2_classic << inst
-  end
-end
-
-def echo_instance(i, is_vpc)
-  ip_to_print = is_vpc ? i[:private_ip] : i[:public_ip]
-
-          print "#{echoState(i[:state])} "
-          print "#{echo_ip(ip_to_print)} "
-          print "#{echo_name(i[:name], 40)} #{echo(i[:ec2_class],12)}"          
-
-          flags = i[:windows] ? 'W'.bold : ' '
-          flags << (i[:spot] ? 'S'.bold : ' ')
-          flags << (i[:monitoring] ? 'M'.bold : ' ')
-          if is_vpc and i[:state] == 'running' and i[:public_ip].nil?
-            flags << 'I'.bold
-          else
-            flags << ' '
-          end
-          print " #{flags} "
-
-          if is_vpc
-            print echo_ip(i[:public_ip])
-          else
-            print echo(i[:arch], 6)
-          end
-          puts "  #{i[:id]}"
-end
-
-vpcs = vpcs.sort_by { |id, vpc| vpc[:cidr] }.each do |ve| 
-  vpc = ve[1]
-  if vpc[:subnets].map { |_,sn| sn[:instances].length } .reduce(:+) > 0
-    vpc[:subnets].sort_by { |id, sn| sn[:cidr] }.each do |se|
-      subnet = se[1]
-      if subnet[:instances].length > 0
-        print "\n----- VPC: ".bold, echo_name(vpc[:name]), "  Subnet: ".bold, echo_name(subnet[:name])
-        print "   #{subnet[:cidr]} - #{subnet[:zone]} "
-        puts "-----".bold
-	      subnet[:instances].sort_by{ |i| i[:private_ip] } .each do |i|
-          echo_instance(i, true)
-        end
-      end
-    end
-  end
-end
-
-if ec2_classic.length > 0
-  puts "\n----- EC2 Classic --------------------------------------------------------------------------------------".bold
-  ec2_classic.sort_by{ |i| i[:name] ? i[:name] : '' } .each do |i|
-          echo_instance(i, false)
-  end
+else
+  print_ec2_list( *( get_ec2_list_info( options[:name_regex] ) ) )
 end
